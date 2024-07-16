@@ -1,2 +1,10 @@
 token.txt
 .vscode/*
+.idea/*
+venv/*
+.DS_Store
+__pycache__
+*.pyc
+*/*
+*.flac
+*.jpg
