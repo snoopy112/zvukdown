@@ -59,22 +59,17 @@ class Zvukdown:
         return filename
 
     @staticmethod
-    def __to_str(l):
-        global int
-        if isinstance(l, int):
-            return [l]
-        elif not isinstance(l, str):
-            l = [str(int) for int in l]
-            l = ",".join(l)
-            l = str(l.strip("[]"))
-        return l
+    def __to_str(ids):
+        if isinstance(ids, (list, set)):
+            ids = ",".join([str(i) for i in ids])
+        else:
+            ids = str(ids)
+        return ids
 
     def __get_copyright(self, label_ids):
-        label_ids = self.__to_str(label_ids)
-
         url = "https://zvuk.com/api/tiny/labels"
         params = {
-            "ids": label_ids
+            "ids": self.__to_str(label_ids)
         }
         r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
         r.raise_for_status()
@@ -83,18 +78,12 @@ class Zvukdown:
         info = {}
         for i in resp["result"]["labels"].values():
             info[i["id"]] = i["title"]
-        if not info:
-            info = {
-                int(label_ids): "Неизвестно"
-            }
         return info
 
     def __get_tracks_metadata(self, track_ids):
-        track_ids = self.__to_str(track_ids)
-
         url = "https://zvuk.com/api/tiny/tracks"
         params = {
-            "ids": track_ids
+            "ids": self.__to_str(track_ids)
         }
         r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
         r.raise_for_status()
@@ -133,7 +122,7 @@ class Zvukdown:
                 "quality": "flac"
             }
             r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-            # r.raise_for_status()
+            r.raise_for_status()
             resp = r.json(strict=False)
 
             links[track_id] = resp["result"]["stream"]
@@ -144,11 +133,9 @@ class Zvukdown:
         return links
 
     def __get_releases_info(self, release_ids):
-        release_ids = self.__to_str(release_ids)
-
         url = "https://zvuk.com/api/tiny/releases"
         params = {
-            "ids": release_ids
+            "ids": self.__to_str(release_ids)
         }
         r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
         r.raise_for_status()
@@ -168,11 +155,9 @@ class Zvukdown:
         return info
 
     def __get_playlists_info(self, playlist_ids):
-        playlist_ids = self.__to_str(playlist_ids)
-
         url = "https://zvuk.com/api/tiny/playlists"
         params = {
-            "ids": playlist_ids
+            "ids": self.__to_str(playlist_ids)
         }
         r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
         r.raise_for_status()
@@ -184,33 +169,31 @@ class Zvukdown:
         pic = Path(f"temp_{release_id}.jpg")
         if not pic.is_file():
             r = requests.get(image_link, allow_redirects=True, verify=self.verify)
+            r.raise_for_status()
             with open(pic, "wb") as p:
                 p.write(r.content)
         return pic
 
-    def __save_track(self, url, metadata, releases, single, playlist, path):
+    def __save_track(self, url, metadata, releases, is_single, is_playlist, path):
         pic = self.__download_image(metadata["release_id"], metadata["image"])
-        if not single and not playlist:
-            if not path:
-                path = f'{releases["author"]} - {releases["album"]} ({str(releases["date"])[:4]})'
-            folder = self.__ntfs(path)
-            if not os.path.exists(folder):
-                os.makedirs(folder)
+
+        folder = self.__ntfs(path)
+        if folder and not os.path.exists(folder):
+            os.makedirs(folder)
+
+        if not is_single and not is_playlist:
+            if not os.path.isfile(os.path.join(folder, "cover.jpg")):
                 copyfile(pic, os.path.join(folder, "cover.jpg"))
             filename = f'{metadata["number"]:02d} - {metadata["name"]}.{metadata["format"]}'
-        elif playlist:
-            folder = self.__ntfs(path)
-            if not os.path.exists(folder):
-                os.makedirs(folder)
-            filename = f'{metadata["author"]} - {metadata["name"]}.{metadata["format"]}'
         else:
-            folder = ""
             filename = f'{metadata["author"]} - {metadata["name"]}.{metadata["format"]}'
 
         filename = self.__ntfs(filename)
         filename = os.path.join(folder, filename)
 
         r = requests.get(url, allow_redirects=True, verify=self.verify)
+        r.raise_for_status()
+
         with open(filename, "wb") as f:
             f.write(r.content)
 
@@ -222,12 +205,11 @@ class Zvukdown:
             audio["ARTIST"] = metadata["author"]
             audio["TITLE"] = metadata["name"]
             audio["ALBUM"] = metadata["album"]
+            audio["GENRE"] = metadata["genre"]
+            audio["DATE"] = str(releases["date"])[:4]
             audio["TRACKNUMBER"] = str(metadata["number"])
             audio["TRACKTOTAL"] = str(releases["tracktotal"])
-
-            audio["GENRE"] = metadata["genre"]
             audio["COPYRIGHT"] = releases["copyright"]
-            audio["DATE"] = str(releases["date"])[:4]
 
             audio["RELEASE_ID"] = str(metadata["release_id"])
             audio["TRACK_ID"] = str(metadata["track_id"])
@@ -242,11 +224,11 @@ class Zvukdown:
             audio = EasyMP3(filename)
             audio["artist"] = metadata["author"]
             audio["title"] = metadata["name"]
-            audio["tracknumber"] = str(metadata["number"])
             audio["album"] = metadata["album"]
-            audio["copyright"] = releases["copyright"]
-            audio["date"] = str(releases["date"])[:4]
             audio["genre"] = metadata["genre"]
+            audio["date"] = str(releases["date"])[:4]
+            audio["tracknumber"] = str(metadata["number"])
+            audio["copyright"] = releases["copyright"]
             audio.save()
 
             id3_tag = ID3(filename)
@@ -262,7 +244,7 @@ class Zvukdown:
         # Printing the metadata
         print(audio.pprint())
 
-    def download_tracks(self, track_ids, single=False, playlist=False, releases=None, path=""):
+    def download_tracks(self, track_ids, is_single=False, is_playlist=False, releases=None, path=""):
         metadata = self.__get_tracks_metadata(track_ids)
         link = self.__get_tracks_link(track_ids)
 
@@ -277,7 +259,7 @@ class Zvukdown:
         for i in metadata.keys():
             index += 1
             print(f"\nСкачивание трека № {index}")
-            self.__save_track(link[i], metadata[i], releases[metadata[i]["release_id"]], single, playlist, path)
+            self.__save_track(link[i], metadata[i], releases[metadata[i]["release_id"]], is_single, is_playlist, path)
 
     def download_albums(self, release_ids):
         releases = self.__get_releases_info(release_ids)
@@ -289,7 +271,7 @@ class Zvukdown:
         for i in releases.values():
             track_ids = i["track_ids"]
             album_path = f'{i["author"]} - {i["album"]} ({str(i["date"])[:4]})'
-            self.download_tracks(track_ids, single=False, playlist=False, releases=releases, path=album_path)
+            self.download_tracks(track_ids, is_single=False, is_playlist=False, releases=releases, path=album_path)
 
     def download_playlists(self, playlist_ids):
         playlists = self.__get_playlists_info(playlist_ids)
@@ -301,7 +283,7 @@ class Zvukdown:
         for i in playlists["result"]["playlists"].values():
             track_ids = i["track_ids"]
             playlist_path = i["title"]
-            self.download_tracks(track_ids, single=False, playlist=True, path=playlist_path)
+            self.download_tracks(track_ids, is_single=False, is_playlist=True, path=playlist_path)
 
 
 if __name__ == "__main__":
@@ -329,7 +311,7 @@ if __name__ == "__main__":
         if release_ids:
             z.download_albums(release_ids)
         if track_ids:
-            z.download_tracks(track_ids, single=True, playlist=False)
+            z.download_tracks(track_ids, is_single=True, is_playlist=False)
         if playlist_ids:
             z.download_playlists(playlist_ids)
         list(map(os.remove, glob.glob("temp*.jpg")))
