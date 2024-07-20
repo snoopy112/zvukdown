@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 from shutil import copyfile
+from pprint import pprint
 
 import requests
 from mutagen.flac import FLAC, Picture
@@ -13,7 +14,11 @@ from mutagen.id3 import ID3, APIC
 class Zvukdown:
     def __init__(self):
         self.verify = True
-        self.headers = {}
+        self.url = "https://zvuk.com/api/v1/graphql"
+        self.headers = {
+            "Content-Type": "application/json",
+            "Host": "zvuk.com"
+        }
 
     def read_token(self):
         import os.path
@@ -22,7 +27,7 @@ class Zvukdown:
                 token = f.read()
                 if len(token) != 32:
                     raise Exception("Некорректный токен")
-                self.headers = {"x-auth-token": token}
+                self.headers.update({"x-auth-token": token})
         else:
             raise Exception("Нет файла token.txt")
 
@@ -35,9 +40,9 @@ class Zvukdown:
             "email": login,
             "password": password,
         }
-        r = requests.post(url, params=params, data=data, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
+        resp = requests.post(url, params=params, data=data, verify=self.verify)
+        resp.raise_for_status()
+        resp = resp.json(strict=False)
 
         token = resp.get("result", {}).get("token")
         if not token:
@@ -59,145 +64,135 @@ class Zvukdown:
         return filename
 
     @staticmethod
-    def __to_str(ids):
-        if isinstance(ids, (list, set)):
-            ids = ",".join([str(i) for i in ids])
-        else:
-            ids = str(ids)
-        return ids
-
-    def __get_copyright(self, label_ids):
-        url = "https://zvuk.com/api/tiny/labels"
-        params = {
-            "ids": self.__to_str(label_ids)
+    def __extract_metadata(track):
+        return {
+            "release_id": track["release"]["id"],
+            "image": track["release"]["image"]["src"].replace(r"{size}", "orig"),
+            "title": track["title"],
+            "artist": track["credits"],
+            "album": track["release"]["title"],
+            "date": track["release"]["date"][:4],
+            "genre": ", ".join(i["name"] for i in track["genres"]),
+            "copyright": track["release"]["label"]["title"] if track["release"]["label"] else "",
+            "tracknumber": str(track["position"]),
+            "tracktotal": str(len(track["release"]["tracks"])),
+            "format": "flac" if track["hasFlac"] else "mp3",
+            "url": track["stream"]["flac"] if track["hasFlac"] else track["stream"]["high"]
         }
-        r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
 
-        info = {}
-        for i in resp["result"]["labels"].values():
-            info[i["id"]] = i["title"]
-        return info
-
-    def __get_tracks_metadata(self, track_ids):
-        url = "https://zvuk.com/api/tiny/tracks"
-        params = {
-            "ids": self.__to_str(track_ids)
+    def __get_tracks_info(self, tracks_ids):
+        body = {
+            "variables": {
+                "ids": tracks_ids
+            },
+            "query": """query getFullTrack($ids: [ID!]!) {
+                getTracks(ids: $ids) {
+                    title
+                    credits
+                    position
+                    genres { name }
+                    release { id title date label { title } image { src } tracks { id } }
+                    hasFlac
+                    stream { flac high }
+                }
+            }"""
         }
-        r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
+        self.headers.update({"Content-Length": str(len(body["query"]))})
 
-        info = {}
-        for s in resp["result"]["tracks"].values():
-            author = s["credits"]
-            name = s["title"]
-            album = s["release_title"]
-            release_id = s["release_id"]
-            track_id = s["id"]
-            if s["genres"]:
-                genre = ", ".join(s["genres"])
-            else:
-                genre = ""
+        resp = requests.post(self.url, headers=self.headers, json=body, verify=self.verify)
+        resp.raise_for_status()
 
-            number = s["position"]
-            image = s["image"]["src"].replace(r"&size={size}&ext=jpg", "")
-            file_format = "flac" if s["has_flac"] else "mp3"
-
-            info[track_id] = {"track_id": track_id, "release_id": release_id, "author": author, "name": name,
-                              "album": album, "genre": genre, "number": number, "image": image, "format": file_format}
-        return info
-
-    def __get_tracks_link(self, track_ids):
-        links = {}
-        index = 0
-
-        print("\nПоиск треков:\n")
-
-        for track_id in track_ids:
-            url = "https://zvuk.com/api/tiny/track/stream"
-            params = {
-                "id": track_id,
-                "quality": "flac"
-            }
-            r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-            r.raise_for_status()
-            resp = r.json(strict=False)
-
-            links[track_id] = resp["result"]["stream"]
-            if links[track_id] != 0:
-                index += 1
-                print(f'{index}. id: {track_id}, url: {resp["result"]["stream"]}')
-
-        return links
+        return resp.json(strict=False)
 
     def __get_releases_info(self, release_ids):
-        url = "https://zvuk.com/api/tiny/releases"
-        params = {
-            "ids": self.__to_str(release_ids)
+        body = {
+            "variables": {
+                "ids": release_ids
+            },
+            "query": """query getReleases($ids: [ID!]!) {
+                getReleases(ids: $ids) {
+                    title
+                    credits
+                    date
+                    tracks {
+                        title
+                        credits
+                        position
+                        genres { name }
+                        release { id title date label { title } image { src } tracks { id } }
+                        hasFlac
+                        stream { flac high }
+                    }
+                }
+            }"""
         }
-        r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
+        self.headers.update({"Content-Length": str(len(body["query"]))})
 
-        labels = set()
-        for i in resp["result"]["releases"].values():
-            labels.add(i["label_id"])
-        labels_info = self.__get_copyright(labels)
+        resp = requests.post(self.url, headers=self.headers, json=body, verify=self.verify)
+        resp.raise_for_status()
 
-        info = {}
-        for a in resp["result"]["releases"].values():
-            info[a["id"]] = {"track_ids": a["track_ids"], "tracktotal": len(a["track_ids"]),
-                             "copyright": labels_info.get(a["label_id"], ""), "date": a["date"],
-                             "album": a["title"], "author": a["credits"]}
-        # print(info)
-        return info
+        return resp.json(strict=False)
 
     def __get_playlists_info(self, playlist_ids):
-        url = "https://zvuk.com/api/tiny/playlists"
-        params = {
-            "ids": self.__to_str(playlist_ids)
+        body = {
+            "variables": {
+                "ids": playlist_ids
+            },
+            "query": """query getShortPlaylist($ids: [ID!]!) {
+                getPlaylists(ids: $ids) {
+                    title
+                    tracks {
+                        title
+                        credits
+                        position
+                        genres { name }
+                        release { id title date label { title } image { src } tracks { id } }
+                        hasFlac
+                        stream { flac high }
+                    }
+                }
+            }"""
         }
-        r = requests.get(url, params=params, headers=self.headers, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
+        self.headers.update({"Content-Length": str(len(body["query"]))})
 
-        return resp
+        resp = requests.post(self.url, headers=self.headers, json=body, verify=self.verify)
+        resp.raise_for_status()
+
+        return resp.json(strict=False)
 
     def __get_favorites_info(self):
-        url = "https://zvuk.com/api/v1/graphql"
-        data = """{
-            "operationName": "userCollection",
-            "variables": {
-                "collectionSubtype": "main"
-            },
-            "query": "query userCollection($collectionSubtype: CollectionSubtype = main) { collection(collectionSubtype: $collectionSubtype) { tracks { id } } }"
-        }"""
-        headers = self.headers.copy()
-        headers.update(
-            {
-                "Content-Type": "application/json",
-                "Host": "zvuk.com",
-                "Content-Length": str(len(data))
-            }
-        )
-        r = requests.post(url, headers=headers, data=data, verify=self.verify)
-        r.raise_for_status()
-        resp = r.json(strict=False)
+        body = {
+            "query": """query userCollection($collectionSubtype: CollectionSubtype = main) {
+                collection(collectionSubtype: $collectionSubtype) {
+                    tracks {
+                        title
+                        credits
+                        position
+                        genres { name }
+                        release { id title date label { title } image { src } tracks { id } }
+                        hasFlac
+                        stream { flac high }
+                    }
+                }
+            }"""
+        }
+        self.headers.update({"Content-Length": str(len(body["query"]))})
 
-        return resp
+        resp = requests.post(self.url, headers=self.headers, json=body, verify=self.verify)
+        resp.raise_for_status()
+
+        return resp.json(strict=False)
 
     def __download_image(self, release_id, image_link):
         pic = Path(f"temp_{release_id}.jpg")
         if not pic.is_file():
-            r = requests.get(image_link, allow_redirects=True, verify=self.verify)
-            r.raise_for_status()
+            resp = requests.get(image_link, allow_redirects=True, verify=self.verify)
+            resp.raise_for_status()
             with open(pic, "wb") as p:
-                p.write(r.content)
+                p.write(resp.content)
         return pic
 
-    def __save_track(self, url, metadata, releases, is_release, path):
+    def __save_track(self, metadata, is_release, path):
         pic = self.__download_image(metadata["release_id"], metadata["image"])
 
         folder = self.__ntfs(path)
@@ -207,35 +202,32 @@ class Zvukdown:
         if is_release:
             if not os.path.isfile(os.path.join(folder, "cover.jpg")):
                 copyfile(pic, os.path.join(folder, "cover.jpg"))
-            filename = f'{metadata["number"]:02d} - {metadata["name"]}.{metadata["format"]}'
+            filename = f'{int(metadata["tracknumber"]):02d} - {metadata["title"]}.{metadata["format"]}'
         else:
-            filename = f'{metadata["author"]} - {metadata["name"]}.{metadata["format"]}'
+            filename = f'{metadata["artist"]} - {metadata["title"]}.{metadata["format"]}'
 
         filename = self.__ntfs(filename)
         filename = os.path.join(folder, filename)
 
-        r = requests.get(url, allow_redirects=True, verify=self.verify)
-        r.raise_for_status()
+        resp = requests.get(metadata["url"], allow_redirects=True, verify=self.verify)
+        resp.raise_for_status()
 
         with open(filename, "wb") as f:
-            f.write(r.content)
+            f.write(resp.content)
 
         with open(pic, "rb") as p:
             cover = p.read()
 
         if metadata["format"] == "flac":
             audio = FLAC(filename)
-            audio["ARTIST"] = metadata["author"]
-            audio["TITLE"] = metadata["name"]
+            audio["ARTIST"] = metadata["artist"]
+            audio["TITLE"] = metadata["title"]
             audio["ALBUM"] = metadata["album"]
             audio["GENRE"] = metadata["genre"]
-            audio["DATE"] = str(releases["date"])[:4]
-            audio["TRACKNUMBER"] = str(metadata["number"])
-            audio["TRACKTOTAL"] = str(releases["tracktotal"])
-            audio["COPYRIGHT"] = releases["copyright"]
-
-            audio["RELEASE_ID"] = str(metadata["release_id"])
-            audio["TRACK_ID"] = str(metadata["track_id"])
+            audio["DATE"] = metadata["date"]
+            audio["TRACKNUMBER"] = metadata["tracknumber"]
+            audio["TRACKTOTAL"] = metadata["tracktotal"]
+            audio["COPYRIGHT"] = metadata["copyright"]
 
             coverart = Picture()
             coverart.data = cover
@@ -245,13 +237,13 @@ class Zvukdown:
             audio.save()
         else:
             audio = EasyMP3(filename)
-            audio["artist"] = metadata["author"]
-            audio["title"] = metadata["name"]
+            audio["artist"] = metadata["artist"]
+            audio["title"] = metadata["title"]
             audio["album"] = metadata["album"]
             audio["genre"] = metadata["genre"]
-            audio["date"] = str(releases["date"])[:4]
-            audio["tracknumber"] = str(metadata["number"])
-            audio["copyright"] = releases["copyright"]
+            audio["date"] = metadata["date"]
+            audio["tracknumber"] = f'{metadata["tracknumber"]}/{metadata["tracktotal"]}'
+            audio["copyright"] = metadata["copyright"]
             audio.save()
 
             id3_tag = ID3(filename)
@@ -267,56 +259,63 @@ class Zvukdown:
         # Printing the metadata
         print(audio.pprint())
 
-    def download_tracks(self, track_ids, is_release=False, releases=None, path=""):
-        metadata = self.__get_tracks_metadata(track_ids)
-        link = self.__get_tracks_link(track_ids)
+    def download_tracks(self, track_ids):
+        tracks = self.__get_tracks_info(track_ids)
+        tracks = tracks["data"]["getTracks"]
 
-        if not releases:
-            release_ids = set()
-            for i in metadata.values():
-                release_ids.add(i["release_id"])
-            releases = self.__get_releases_info(release_ids)
+        print("\nИнформация о треках: \n")
+        pprint(tracks)
 
-        print("\nСкачивание треков:")
-        index = 0
-        for i in metadata.keys():
-            index += 1
-            print(f"\nСкачивание трека № {index}")
-            self.__save_track(link[i], metadata[i], releases[metadata[i]["release_id"]], is_release, path)
+        for i, track in enumerate(tracks, 1):
+            print(f'\nСкачивание трека № {i}/{len(tracks)}')
+            self.__save_track(self.__extract_metadata(track), is_release=False, path="")
 
-    def download_albums(self, release_ids):
+    def download_releases(self, release_ids):
         releases = self.__get_releases_info(release_ids)
+        releases = releases["data"]["getReleases"]
 
-        print("\nИнформация о релизе: \n")
-        from pprint import pprint
+        print("\nИнформация о релизах: \n")
         pprint(releases)
 
-        for i in releases.values():
-            track_ids = i["track_ids"]
-            album_path = f'{i["author"]} - {i["album"]} ({str(i["date"])[:4]})'
-            self.download_tracks(track_ids, is_release=True, releases=releases, path=album_path)
+        for album in releases:
+            album_path = f'{album["credits"]} - {album["title"]} ({str(album["date"])[:4]})'
+
+            print(f'\nСкачивание треков из релиза {album["credits"]} «‎{album["title"]}»‎')
+
+            for i, track in enumerate(album["tracks"], 1):
+                print(f'\nСкачивание трека № {i}/{len(album["tracks"])}')
+                self.__save_track(self.__extract_metadata(track), is_release=True, path=album_path)
 
     def download_playlists(self, playlist_ids):
         playlists = self.__get_playlists_info(playlist_ids)
+        playlists = playlists["data"]["getPlaylists"]
 
-        print("\nИнформация о плейлисте: \n")
-        from pprint import pprint
+        print("\nИнформация о плейлистах: \n")
         pprint(playlists)
 
-        for i in playlists["result"]["playlists"].values():
-            track_ids = i["track_ids"]
-            playlist_path = i["title"]
-            self.download_tracks(track_ids, path=playlist_path)
+        for playlist in playlists:
+            playlist_title = f'{playlist["title"]}'
+
+            print(f"\nСкачивание треков из плейлиста «‎{playlist_title}»‎")
+
+            for i, track in enumerate(playlist["tracks"], 1):
+                print(f'\nСкачивание трека № {i}/{len(playlist["tracks"])}')
+                self.__save_track(self.__extract_metadata(track), is_release=False, path=playlist_title)
 
     def download_favorites(self):
         favorites = self.__get_favorites_info()
+        favorites = favorites["data"]["collection"]["tracks"]
 
         print("\nИнформация о коллекции: \n")
-        from pprint import pprint
         pprint(favorites)
 
-        favorites_ids = [int(i["id"]) for i in favorites["data"]["collection"]["tracks"]]
-        self.download_tracks(favorites_ids, path="Моя коллекция")
+        playlist_title = "Моя коллекция"
+
+        print(f"\nСкачивание треков из плейлиста «‎{playlist_title}»‎")
+
+        for i, track in enumerate(favorites, 1):
+            print(f'\nСкачивание трека № {i}/{len(favorites)}')
+            self.__save_track(self.__extract_metadata(track), is_release=False, path=playlist_title)
 
 
 if __name__ == "__main__":
@@ -345,7 +344,7 @@ if __name__ == "__main__":
 
         z.read_token()
         if release_ids:
-            z.download_albums(release_ids)
+            z.download_releases(release_ids)
         if track_ids:
             z.download_tracks(track_ids)
         if playlist_ids:
