@@ -165,6 +165,29 @@ class Zvukdown:
 
         return resp
 
+    def __get_favorites_info(self):
+        url = "https://zvuk.com/api/v1/graphql"
+        data = """{
+            "operationName": "userCollection",
+            "variables": {
+                "collectionSubtype": "main"
+            },
+            "query": "query userCollection($collectionSubtype: CollectionSubtype = main) { collection(collectionSubtype: $collectionSubtype) { tracks { id } } }"
+        }"""
+        headers = self.headers.copy()
+        headers.update(
+            {
+                "Content-Type": "application/json",
+                "Host": "zvuk.com",
+                "Content-Length": str(len(data))
+            }
+        )
+        r = requests.post(url, headers=headers, data=data, verify=self.verify)
+        r.raise_for_status()
+        resp = r.json(strict=False)
+
+        return resp
+
     def __download_image(self, release_id, image_link):
         pic = Path(f"temp_{release_id}.jpg")
         if not pic.is_file():
@@ -174,14 +197,14 @@ class Zvukdown:
                 p.write(r.content)
         return pic
 
-    def __save_track(self, url, metadata, releases, is_single, is_playlist, path):
+    def __save_track(self, url, metadata, releases, is_release, path):
         pic = self.__download_image(metadata["release_id"], metadata["image"])
 
         folder = self.__ntfs(path)
         if folder and not os.path.exists(folder):
             os.makedirs(folder)
 
-        if not is_single and not is_playlist:
+        if is_release:
             if not os.path.isfile(os.path.join(folder, "cover.jpg")):
                 copyfile(pic, os.path.join(folder, "cover.jpg"))
             filename = f'{metadata["number"]:02d} - {metadata["name"]}.{metadata["format"]}'
@@ -244,7 +267,7 @@ class Zvukdown:
         # Printing the metadata
         print(audio.pprint())
 
-    def download_tracks(self, track_ids, is_single=False, is_playlist=False, releases=None, path=""):
+    def download_tracks(self, track_ids, is_release=False, releases=None, path=""):
         metadata = self.__get_tracks_metadata(track_ids)
         link = self.__get_tracks_link(track_ids)
 
@@ -259,7 +282,7 @@ class Zvukdown:
         for i in metadata.keys():
             index += 1
             print(f"\nСкачивание трека № {index}")
-            self.__save_track(link[i], metadata[i], releases[metadata[i]["release_id"]], is_single, is_playlist, path)
+            self.__save_track(link[i], metadata[i], releases[metadata[i]["release_id"]], is_release, path)
 
     def download_albums(self, release_ids):
         releases = self.__get_releases_info(release_ids)
@@ -271,7 +294,7 @@ class Zvukdown:
         for i in releases.values():
             track_ids = i["track_ids"]
             album_path = f'{i["author"]} - {i["album"]} ({str(i["date"])[:4]})'
-            self.download_tracks(track_ids, is_single=False, is_playlist=False, releases=releases, path=album_path)
+            self.download_tracks(track_ids, is_release=True, releases=releases, path=album_path)
 
     def download_playlists(self, playlist_ids):
         playlists = self.__get_playlists_info(playlist_ids)
@@ -283,7 +306,17 @@ class Zvukdown:
         for i in playlists["result"]["playlists"].values():
             track_ids = i["track_ids"]
             playlist_path = i["title"]
-            self.download_tracks(track_ids, is_single=False, is_playlist=True, path=playlist_path)
+            self.download_tracks(track_ids, path=playlist_path)
+
+    def download_favorites(self):
+        favorites = self.__get_favorites_info()
+
+        print("\nИнформация о коллекции: \n")
+        from pprint import pprint
+        pprint(favorites)
+
+        favorites_ids = [int(i["id"]) for i in favorites["data"]["collection"]["tracks"]]
+        self.download_tracks(favorites_ids, path="Моя коллекция")
 
 
 if __name__ == "__main__":
@@ -291,6 +324,7 @@ if __name__ == "__main__":
     release_ids = []
     track_ids = []
     playlist_ids = []
+    is_favorites = False
     z = Zvukdown()
 
     if "login" in sys.argv:
@@ -306,12 +340,16 @@ if __name__ == "__main__":
                 track_ids.append(int(i.strip("https://zvuk.com/track/")))
             elif "playlist" in i:
                 playlist_ids.append(int(i.strip("https://zvuk.com/playlist/")))
+            elif "favorites" in i:
+                is_favorites = True
 
         z.read_token()
         if release_ids:
             z.download_albums(release_ids)
         if track_ids:
-            z.download_tracks(track_ids, is_single=True, is_playlist=False)
+            z.download_tracks(track_ids)
         if playlist_ids:
             z.download_playlists(playlist_ids)
+        if is_favorites:
+            z.download_favorites()
         list(map(os.remove, glob.glob("temp*.jpg")))
