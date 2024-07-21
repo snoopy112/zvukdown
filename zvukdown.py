@@ -38,7 +38,7 @@ class Zvukdown:
         }
         data = {
             "email": login,
-            "password": password,
+            "password": password
         }
         resp = requests.post(url, params=params, data=data, verify=self.verify)
         resp.raise_for_status()
@@ -80,10 +80,10 @@ class Zvukdown:
             "url": track["stream"]["flac"] if track["hasFlac"] else track["stream"]["high"]
         }
 
-    def __get_tracks_info(self, tracks_ids):
+    def __get_tracks_info(self, track_ids):
         body = {
             "variables": {
-                "ids": tracks_ids
+                "ids": track_ids
             },
             "query": """query getFullTrack($ids: [ID!]!) {
                 getTracks(ids: $ids) {
